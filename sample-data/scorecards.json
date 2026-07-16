@@ -1,0 +1,45 @@
+[
+  {
+    "date": "2025-05-15T08:00:00Z",
+    "repo": { "name": "github.com/example/legacy-api", "commit": "aaaa1111bbbb2222" },
+    "scorecard": { "version": "v5.2.1" },
+    "score": 4.2,
+    "checks": [
+      { "name": "Branch-Protection", "score": 2, "reason": "branch protection is not enabled" },
+      { "name": "Dangerous-Workflow", "score": 3, "reason": "untrusted input is used in a privileged workflow" },
+      { "name": "Maintained", "score": 4, "reason": "few commits found in the last 90 days" },
+      { "name": "Vulnerabilities", "score": 0, "reason": "known vulnerability CVE-2021-44228 detected" }
+    ]
+  },
+  {
+    "date": "2025-12-10T10:30:00Z",
+    "repo": { "name": "github.com/example/web-platform", "commit": "cccc3333dddd4444" },
+    "score": 6.8,
+    "checks": [
+      { "name": "Pinned-Dependencies", "score": 4, "reason": "several GitHub Actions are not pinned by hash" },
+      { "name": "Security-Policy", "score": 3, "reason": "security policy does not include a disclosure process" },
+      { "name": "Vulnerabilities", "score": 5, "reason": "review GHSA-jfhm-5ghh-2f97 for applicability" }
+    ]
+  },
+  {
+    "date": "2026-06-28T14:20:00Z",
+    "repo": { "name": "github.com/example/web-platform", "commit": "eeee5555ffff6666" },
+    "score": 8.1,
+    "checks": [
+      { "name": "Pinned-Dependencies", "score": 8, "reason": "most dependencies are pinned" },
+      { "name": "Security-Policy", "score": 7, "reason": "security policy is present" },
+      { "name": "Vulnerabilities", "score": 10, "reason": "no known vulnerabilities detected" }
+    ]
+  },
+  {
+    "date": "2026-07-08T09:15:00Z",
+    "repo": { "name": "github.com/example/secure-service", "commit": "1111222233334444" },
+    "score": 9.3,
+    "checks": [
+      { "name": "Branch-Protection", "score": 10, "reason": "branch protection is enabled" },
+      { "name": "Code-Review", "score": 10, "reason": "changes require review" },
+      { "name": "Token-Permissions", "score": 9, "reason": "workflow tokens are read-only" },
+      { "name": "Vulnerabilities", "score": 10, "reason": "no known vulnerabilities detected" }
+    ]
+  }
+]

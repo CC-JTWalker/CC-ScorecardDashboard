@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'">
+  <title>Scorecard Radar</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">SR</div>
+      <div>
+        <h1>Scorecard Radar</h1>
+        <p>OpenSSF posture and vulnerability triage</p>
+      </div>
+    </div>
+    <div class="top-actions">
+      <button id="refreshButton" class="button ghost" disabled>Refresh</button>
+      <button id="enrichButton" class="button secondary" disabled>Check vulnerabilities</button>
+      <button id="openButton" class="button primary">Open directory</button>
+      <button id="settingsButton" class="icon-button" aria-label="Settings" title="Settings">⚙</button>
+    </div>
+  </header>
+
+  <main>
+    <section id="welcome" class="welcome">
+      <div class="welcome-card">
+        <div class="radar-visual" aria-hidden="true"><span></span><span></span><span></span><i></i></div>
+        <p class="eyebrow">LOCAL-FIRST SECURITY REVIEW</p>
+        <h2>Turn a folder of Scorecard JSON into an actionable security view.</h2>
+        <p>Scan reports recursively, compare repository history, flag stale scans, rank weak checks, and enrich CVEs with live exploitation evidence.</p>
+        <button id="welcomeOpenButton" class="button primary large">Choose report directory</button>
+        <p class="drop-note">You can also drag a directory anywhere onto this window.</p>
+        <p class="privacy-note">Report files stay local. Only vulnerability identifiers are sent to the selected public intelligence services.</p>
+      </div>
+    </section>
+
+    <section id="dashboard" class="dashboard hidden">
+      <div class="directory-strip">
+        <div>
+          <span class="muted-label">DIRECTORY</span>
+          <strong id="directoryPath"></strong>
+        </div>
+        <div id="scanStatus" class="status-text"></div>
+      </div>
+
+      <section id="summaryCards" class="summary-grid"></section>
+
+      <section class="panel risk-panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">ATTENTION QUEUE</p>
+            <h2>Biggest issues</h2>
+          </div>
+          <span id="intelFreshness" class="source-status">Vulnerability intelligence not checked</span>
+        </div>
+        <div id="attentionQueue" class="attention-grid"></div>
+      </section>
+
+      <section class="panel table-panel">
+        <div class="toolbar">
+          <div class="search-wrap">
+            <span aria-hidden="true">⌕</span>
+            <input id="searchInput" type="search" placeholder="Search repository, check, CVE, or filename">
+          </div>
+          <select id="statusFilter" aria-label="Filter status">
+            <option value="all">All reports</option>
+            <option value="critical">Critical attention</option>
+            <option value="low-score">Score below 7</option>
+            <option value="stale">Stale over 270 days</option>
+            <option value="expired">Stale over 360 days</option>
+            <option value="vulnerable">Has vulnerability IDs</option>
+          </select>
+          <select id="sortSelect" aria-label="Sort reports">
+            <option value="priority-desc">Highest priority</option>
+            <option value="score-asc">Lowest score</option>
+            <option value="score-desc">Highest score</option>
+            <option value="date-asc">Oldest scan</option>
+            <option value="date-desc">Newest scan</option>
+            <option value="repo-asc">Repository A–Z</option>
+          </select>
+          <label class="toggle"><input id="latestOnlyToggle" type="checkbox" checked><span></span>Latest per repository</label>
+          <button id="exportButton" class="button ghost">Export CSV</button>
+        </div>
+
+        <div class="legend">
+          <span><i class="legend-dot yellow"></i>Over 270 days</span>
+          <span><i class="legend-dot red"></i>Over 360 days</span>
+          <span id="resultCount"></span>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Repository</th>
+                <th>Score</th>
+                <th>Trend</th>
+                <th>Biggest issue</th>
+                <th>Vulnerability risk</th>
+                <th>Last scanned</th>
+                <th>Age</th>
+              </tr>
+            </thead>
+            <tbody id="reportTableBody"></tbody>
+          </table>
+          <div id="emptyResults" class="empty-results hidden">No reports match the current filters.</div>
+        </div>
+      </section>
+
+      <details id="scanErrorsPanel" class="panel errors-panel hidden">
+        <summary><span id="scanErrorCount"></span> files could not be read</summary>
+        <div id="scanErrors"></div>
+      </details>
+    </section>
+  </main>
+
+  <aside id="detailDrawer" class="drawer" aria-hidden="true">
+    <div class="drawer-header">
+      <div>
+        <p id="drawerEyebrow" class="eyebrow"></p>
+        <h2 id="drawerTitle"></h2>
+      </div>
+      <button id="closeDrawerButton" class="icon-button" aria-label="Close details">×</button>
+    </div>
+    <div id="drawerHero" class="drawer-hero"></div>
+    <nav id="drawerTabs" class="tabs">
+      <button data-tab="overview" class="active">Overview</button>
+      <button data-tab="checks">Checks</button>
+      <button data-tab="vulnerabilities">Vulnerabilities</button>
+      <button data-tab="history">History</button>
+      <button data-tab="raw">Raw JSON</button>
+    </nav>
+    <div id="drawerContent" class="drawer-content"></div>
+  </aside>
+  <div id="drawerBackdrop" class="backdrop hidden"></div>
+
+  <dialog id="settingsDialog">
+    <form method="dialog" class="dialog-card">
+      <div class="dialog-heading">
+        <div><p class="eyebrow">PREFERENCES</p><h2>Settings</h2></div>
+        <button value="cancel" class="icon-button" aria-label="Close settings">×</button>
+      </div>
+      <label class="setting-row">
+        <span><strong>Scan subdirectories</strong><small>Recursively find JSON files.</small></span>
+        <input id="recursiveToggle" type="checkbox" checked>
+      </label>
+      <label class="setting-row">
+        <span><strong>Automatic vulnerability checks</strong><small>Enrich identifiers after opening a directory.</small></span>
+        <input id="autoEnrichToggle" type="checkbox" checked>
+      </label>
+      <div class="setting-block">
+        <label for="githubToken"><strong>GitHub token</strong></label>
+        <small>Optional. Increases GitHub Advisory API limits. Stored using the operating system's secure credential encryption.</small>
+        <div class="token-row">
+          <input id="githubToken" type="password" autocomplete="off" placeholder="Leave blank to keep the current token">
+          <button id="saveTokenButton" type="button" class="button secondary">Save token</button>
+          <button id="removeTokenButton" type="button" class="button ghost">Remove</button>
+        </div>
+        <span id="tokenStatus" class="status-text"></span>
+      </div>
+      <div class="setting-block">
+        <strong>Intelligence cache</strong>
+        <small>Results are cached for 24 hours; the CISA KEV catalog is cached for 12 hours.</small>
+        <button id="clearCacheButton" type="button" class="button ghost">Clear cached intelligence</button>
+      </div>
+      <div class="dialog-actions"><button value="cancel" class="button primary">Done</button></div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="app.js"></script>
+</body>
+</html>
