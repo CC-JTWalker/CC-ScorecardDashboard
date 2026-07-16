@@ -299,7 +299,7 @@ function renderDrawer() {
   if (state.activeTab === 'checks') els.drawerContent.innerHTML = checksHtml(report);
   if (state.activeTab === 'vulnerabilities') els.drawerContent.innerHTML = vulnerabilitiesHtml(report);
   if (state.activeTab === 'history') els.drawerContent.innerHTML = historyHtml(report);
-  if (state.activeTab === 'raw') els.drawerContent.innerHTML = `<pre class="raw">${escapeHtml(JSON.stringify(report.raw, null, 2))}</pre>`;
+  if (state.activeTab === 'raw') els.drawerContent.innerHTML = `<pre class="raw">${escapeHtml(rawJsonForDisplay(report.raw))}</pre>`;
   bindDrawerActions(report);
 }
 
@@ -605,7 +605,14 @@ function scoreDescValue(value) { return Number.isFinite(value) ? value : -999; }
 function signed(value) { return `${value >= 0 ? '+' : ''}${Number(value).toFixed(1)}`; }
 function plural(number) { return number === 1 ? '' : 's'; }
 function truncate(value, length) { const text = String(value || ''); return text.length > length ? `${text.slice(0, length - 1)}…` : text; }
-function csvCell(value) { const text = String(value ?? ''); return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text; }
+function csvCell(value) { const raw = String(value ?? ''); const text = /^[=+\-@]/.test(raw) ? `'${raw}` : raw; return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text; }
+function rawJsonForDisplay(value) {
+  const maxChars = 2 * 1024 * 1024;
+  const serialized = JSON.stringify(value, null, 2) || '';
+  if (serialized.length <= maxChars) return serialized;
+  return `${serialized.slice(0, maxChars)}\n\n… output truncated (${serialized.length - maxChars} characters omitted)`;
+}
+
 function escapeHtml(value) { return String(value ?? '').replace(/[&<>"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[char]); }
 function escapeAttr(value) { return escapeHtml(value).replaceAll("'", '&#39;'); }
 function loadBoolean(key, fallback) { const value = localStorage.getItem(`scorecard-radar:${key}`); return value == null ? fallback : value === 'true'; }

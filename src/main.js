@@ -4,14 +4,27 @@ const { app, BrowserWindow, dialog, ipcMain, shell, safeStorage } = require('ele
 const fs = require('node:fs/promises');
 const fsSync = require('node:fs');
 const path = require('node:path');
+const { pathToFileURL } = require('node:url');
 const { parseReportText } = require('./lib/scorecard');
 const { VulnerabilityIntelService } = require('./lib/vuln-intel');
+const {
+  isPathWithin,
+  isSafeHttpsUrl,
+  normalizeIdentifiers,
+  validateCsvText,
+  validateGitHubToken
+} = require('./lib/security');
 
 const MAX_JSON_BYTES = 25 * 1024 * 1024;
 const MAX_FILES = 10000;
+const RENDERER_FILE = path.join(__dirname, 'renderer', 'index.html');
+const RENDERER_URL = pathToFileURL(RENDERER_FILE).href;
+
 let mainWindow;
 let pendingDirectory = findDirectoryArg(process.argv);
 let intelService;
+let activeScanDirectory = '';
+let allowedReportFiles = new Set();
 
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
@@ -27,7 +40,7 @@ if (!gotLock) {
   });
 }
 
-app.whenReady().then(async () => {
+app.whenReady().then(() => {
   intelService = new VulnerabilityIntelService({
     cacheDir: path.join(app.getPath('userData'), 'intel-cache'),
     getGitHubToken: () => readSettings().githubToken || ''
@@ -50,7 +63,7 @@ app.on('open-file', (event, filePath) => {
   try {
     if (fsSync.statSync(filePath).isDirectory()) sendDirectory(filePath);
   } catch {
-    // Ignore invalid OS open events.
+    // Ignore invalid operating-system open events.
   }
 });
 
@@ -62,22 +75,33 @@ function createWindow() {
     minHeight: 680,
     title: 'Scorecard Radar',
     backgroundColor: '#0b1020',
+    show: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true
+      sandbox: true,
+      webSecurity: true,
+      allowRunningInsecureContent: false,
+      devTools: !app.isPackaged
     }
   });
 
-  mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+  const session = mainWindow.webContents.session;
+  session.setPermissionCheckHandler(() => false);
+  session.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
+
+  mainWindow.loadFile(RENDERER_FILE);
+  mainWindow.once('ready-to-show', () => mainWindow?.show());
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (isAllowedExternalUrl(url)) shell.openExternal(url);
+    if (isSafeHttpsUrl(url)) void shell.openExternal(url);
     return { action: 'deny' };
   });
+  mainWindow.webContents.on('will-attach-webview', (event) => event.preventDefault());
   mainWindow.webContents.on('will-navigate', (event, url) => {
-    if (url !== mainWindow.webContents.getURL()) event.preventDefault();
+    if (url !== RENDERER_URL) event.preventDefault();
   });
+  mainWindow.webContents.on('will-download', (event) => event.preventDefault());
   mainWindow.webContents.once('did-finish-load', () => {
     if (pendingDirectory) {
       sendDirectory(pendingDirectory);
@@ -87,7 +111,7 @@ function createWindow() {
 }
 
 function registerIpc() {
-  ipcMain.handle('directory:choose', async () => {
+  handleTrusted('directory:choose', async () => {
     const result = await dialog.showOpenDialog(mainWindow, {
       title: 'Choose a directory containing Scorecard JSON reports',
       properties: ['openDirectory']
@@ -95,30 +119,31 @@ function registerIpc() {
     return result.canceled ? null : result.filePaths[0];
   });
 
-  ipcMain.handle('directory:scan', async (_event, request) => {
+  handleTrusted('directory:scan', async (_event, request) => {
     const directory = await validateDirectory(request?.directory);
     return scanDirectory(directory, request?.recursive !== false);
   });
 
-  ipcMain.handle('intel:enrich', async (event, identifiers) => {
-    return intelService.enrich(identifiers, (progress) => {
-      event.sender.send('intel:progress', progress);
+  handleTrusted('intel:enrich', async (event, identifiers) => {
+    const cleanIdentifiers = normalizeIdentifiers(identifiers);
+    return intelService.enrich(cleanIdentifiers, (progress) => {
+      if (!event.sender.isDestroyed()) event.sender.send('intel:progress', progress);
     });
   });
 
-  ipcMain.handle('intel:clear-cache', async () => {
+  handleTrusted('intel:clear-cache', async () => {
     await intelService.clearCache();
     return true;
   });
 
-  ipcMain.handle('settings:get', async () => {
+  handleTrusted('settings:get', async () => {
     const settings = readSettings();
     return { hasGitHubToken: Boolean(settings.githubToken) };
   });
 
-  ipcMain.handle('settings:set-github-token', async (_event, token) => {
-    const cleanToken = String(token || '').trim();
-    if (cleanToken && !safeStorage.isEncryptionAvailable()) {
+  handleTrusted('settings:set-github-token', async (_event, token) => {
+    const cleanToken = validateGitHubToken(token);
+    if (cleanToken && !secureStorageAvailable()) {
       throw new Error('Secure credential storage is not available on this system. The token was not saved.');
     }
     const stored = readSettingsRaw();
@@ -128,44 +153,68 @@ function registerIpc() {
     return { hasGitHubToken: Boolean(cleanToken) };
   });
 
-  ipcMain.handle('path:show', async (_event, filePath) => {
-    const resolved = path.resolve(String(filePath || ''));
+  handleTrusted('path:show', async (_event, filePath) => {
+    const resolved = await fs.realpath(path.resolve(String(filePath || '')));
+    if (!activeScanDirectory || !isPathWithin(activeScanDirectory, resolved) || !allowedReportFiles.has(resolved)) {
+      throw new Error('The requested file is not part of the active scan.');
+    }
     shell.showItemInFolder(resolved);
     return true;
   });
 
-  ipcMain.handle('external:open', async (_event, url) => {
-    if (!isAllowedExternalUrl(url)) throw new Error('Blocked unsafe external URL.');
-    await shell.openExternal(url);
+  handleTrusted('external:open', async (_event, url) => {
+    if (!isSafeHttpsUrl(url)) throw new Error('Blocked unsafe external URL.');
+    await shell.openExternal(String(url));
     return true;
   });
 
-  ipcMain.handle('export:csv', async (_event, csvText) => {
+  handleTrusted('export:csv', async (_event, csvText) => {
+    const cleanCsv = validateCsvText(csvText);
     const result = await dialog.showSaveDialog(mainWindow, {
       title: 'Export Scorecard summary',
       defaultPath: 'scorecard-radar-export.csv',
       filters: [{ name: 'CSV', extensions: ['csv'] }]
     });
     if (result.canceled || !result.filePath) return null;
-    await fs.writeFile(result.filePath, String(csvText || ''), 'utf8');
+    await fs.writeFile(result.filePath, cleanCsv, { encoding: 'utf8', mode: 0o600 });
     return result.filePath;
   });
+}
+
+function handleTrusted(channel, handler) {
+  ipcMain.handle(channel, async (event, ...args) => {
+    assertTrustedSender(event);
+    return handler(event, ...args);
+  });
+}
+
+function assertTrustedSender(event) {
+  const senderUrl = event.senderFrame?.url || event.sender?.getURL?.() || '';
+  if (!mainWindow || event.sender !== mainWindow.webContents || senderUrl !== RENDERER_URL) {
+    throw new Error('Rejected IPC call from an untrusted renderer.');
+  }
 }
 
 async function scanDirectory(directory, recursive) {
   const files = await findJsonFiles(directory, recursive);
   const reports = [];
   const errors = [];
+  const authorizedFiles = new Set();
 
   for (const filePath of files) {
     try {
-      const stat = await fs.stat(filePath);
-      if (stat.size > MAX_JSON_BYTES) {
-        errors.push({ filePath, message: `Skipped: file is larger than ${MAX_JSON_BYTES / 1024 / 1024} MB.` });
+      const realFilePath = await fs.realpath(filePath);
+      if (!isPathWithin(directory, realFilePath)) {
+        errors.push({ filePath, message: 'Skipped: resolved path is outside the selected directory.' });
         continue;
       }
-      const text = await fs.readFile(filePath, 'utf8');
-      const parsed = parseReportText(text, filePath);
+      const stat = await fs.stat(realFilePath);
+      if (stat.size > MAX_JSON_BYTES) {
+        errors.push({ filePath: realFilePath, message: `Skipped: file is larger than ${MAX_JSON_BYTES / 1024 / 1024} MB.` });
+        continue;
+      }
+      const text = await fs.readFile(realFilePath, 'utf8');
+      const parsed = parseReportText(text, realFilePath);
       for (const report of parsed) {
         reports.push({
           ...report,
@@ -175,12 +224,15 @@ async function scanDirectory(directory, recursive) {
           fileSize: stat.size
         });
       }
-      if (!parsed.length) errors.push({ filePath, message: 'No recognizable Scorecard report object found.' });
+      authorizedFiles.add(realFilePath);
+      if (!parsed.length) errors.push({ filePath: realFilePath, message: 'No recognizable Scorecard report object found.' });
     } catch (error) {
-      errors.push({ filePath, message: error.message });
+      errors.push({ filePath, message: safeErrorMessage(error) });
     }
   }
 
+  activeScanDirectory = directory;
+  allowedReportFiles = authorizedFiles;
   return { directory, reports, errors, fileCount: files.length, scannedAt: new Date().toISOString() };
 }
 
@@ -213,10 +265,10 @@ function findDirectoryArg(argv) {
   for (const arg of argv.slice(1)) {
     if (!arg || arg.startsWith('-')) continue;
     try {
-      const resolved = path.resolve(arg);
-      if (fsSync.existsSync(resolved) && fsSync.statSync(resolved).isDirectory()) return resolved;
+      const resolved = fsSync.realpathSync(path.resolve(arg));
+      if (fsSync.statSync(resolved).isDirectory()) return resolved;
     } catch {
-      // Ignore invalid command line paths.
+      // Ignore invalid command-line paths.
     }
   }
   return null;
@@ -230,22 +282,14 @@ function sendDirectory(directory) {
   }
 }
 
-function isAllowedExternalUrl(value) {
-  try {
-    const url = new URL(String(value));
-    return url.protocol === 'https:';
-  } catch {
-    return false;
-  }
-}
-
 function settingsPath() {
   return path.join(app.getPath('userData'), 'settings.json');
 }
 
 function readSettingsRaw() {
   try {
-    return JSON.parse(fsSync.readFileSync(settingsPath(), 'utf8'));
+    const parsed = JSON.parse(fsSync.readFileSync(settingsPath(), 'utf8'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
   } catch {
     return {};
   }
@@ -254,9 +298,9 @@ function readSettingsRaw() {
 function readSettings() {
   const raw = readSettingsRaw();
   let githubToken = '';
-  if (raw.githubTokenEncrypted && safeStorage.isEncryptionAvailable()) {
+  if (typeof raw.githubTokenEncrypted === 'string' && secureStorageAvailable()) {
     try {
-      githubToken = safeStorage.decryptString(Buffer.from(raw.githubTokenEncrypted, 'base64'));
+      githubToken = validateGitHubToken(safeStorage.decryptString(Buffer.from(raw.githubTokenEncrypted, 'base64')));
     } catch {
       githubToken = '';
     }
@@ -264,10 +308,27 @@ function readSettings() {
   return { githubToken };
 }
 
+function secureStorageAvailable() {
+  if (!safeStorage.isEncryptionAvailable()) return false;
+  if (process.platform === 'linux' && typeof safeStorage.getSelectedStorageBackend === 'function') {
+    return safeStorage.getSelectedStorageBackend() !== 'basic_text';
+  }
+  return true;
+}
+
 function writeSettingsRaw(value) {
   const filePath = settingsPath();
-  fsSync.mkdirSync(path.dirname(filePath), { recursive: true });
-  const temp = `${filePath}.${process.pid}.tmp`;
-  fsSync.writeFileSync(temp, JSON.stringify(value, null, 2), { mode: 0o600 });
+  fsSync.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  const temp = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  fsSync.writeFileSync(temp, JSON.stringify(value, null, 2), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
   fsSync.renameSync(temp, filePath);
+  try {
+    fsSync.chmodSync(filePath, 0o600);
+  } catch {
+    // Windows and some filesystems do not expose POSIX modes.
+  }
+}
+
+function safeErrorMessage(error) {
+  return error instanceof Error && error.message ? error.message : 'Unknown scan error.';
 }

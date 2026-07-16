@@ -91,3 +91,43 @@ test('calculates CVSS v3 base score from OSV vectors', () => {
   assert.equal(result.cvss.score, 9.8);
   assert.equal(result.severity, 'critical');
 });
+
+test('rejects excessively nested report containers without overflowing the stack', () => {
+  let value = { repo: { name: 'github.com/acme/deep' }, score: 7, checks: [] };
+  for (let index = 0; index < 110; index += 1) value = [value];
+  assert.throws(() => parseReportText(JSON.stringify(value), '/tmp/deep.json'), /nesting exceeds/);
+});
+
+test('bounds oversized text fields and check collections', () => {
+  const [report] = parseReportText(JSON.stringify({
+    repo: { name: `github.com/acme/${'x'.repeat(25000)}` },
+    score: 7,
+    checks: Array.from({ length: 5100 }, (_, index) => ({ name: `Check-${index}`, score: 10 }))
+  }), '/tmp/bounds.json');
+  assert.equal(report.checks.length, 5000);
+  assert.ok(report.repo.length <= 20000);
+});
+
+test('bounds untrusted advisory text before returning it to the renderer', () => {
+  const result = combineIntel('CVE-2099-0002', {
+    github: {
+      severity: 'high',
+      summary: 't'.repeat(1000),
+      description: 'd'.repeat(25000),
+      vulnerabilities: [{
+        package: { ecosystem: 'npm', name: 'p'.repeat(1000) },
+        vulnerable_version_range: 'r'.repeat(3000),
+        first_patched_version: '1.2.3'
+      }]
+    },
+    osv: null,
+    kev: null,
+    epss: null,
+    aliases: Array.from({ length: 150 }, (_, index) => `CVE-2099-${String(index).padStart(4, '0')}`)
+  });
+  assert.ok(result.title.length <= 501);
+  assert.ok(result.description.length <= 20001);
+  assert.equal(result.aliases.length, 100);
+  assert.ok(result.affected[0].package.length <= 501);
+  assert.ok(result.affected[0].vulnerableRange.length <= 2001);
+});

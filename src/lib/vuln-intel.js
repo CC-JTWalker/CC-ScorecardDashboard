@@ -2,6 +2,7 @@
 
 const fs = require('node:fs/promises');
 const path = require('node:path');
+const { isSafeHttpsUrl, normalizeIdentifiers } = require('./security');
 
 const CISA_KEV_URL = 'https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json';
 const OSV_URL = 'https://api.osv.dev/v1/vulns/';
@@ -9,6 +10,10 @@ const GITHUB_ADVISORIES_URL = 'https://api.github.com/advisories';
 const EPSS_URL = 'https://api.first.org/data/v1/epss';
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const KEV_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
+const MAX_ADVISORY_BYTES = 5 * 1024 * 1024;
+const MAX_EPSS_BYTES = 10 * 1024 * 1024;
+const MAX_KEV_BYTES = 30 * 1024 * 1024;
+const USER_AGENT = 'Scorecard-Radar/1.1.0';
 
 class VulnerabilityIntelService {
   constructor({ cacheDir, getGitHubToken = () => '' } = {}) {
@@ -19,10 +24,10 @@ class VulnerabilityIntelService {
   }
 
   async enrich(identifiers, onProgress = () => {}) {
-    const ids = [...new Set((identifiers || []).map((id) => String(id).toUpperCase()))];
+    const ids = normalizeIdentifiers(identifiers);
     if (!ids.length) return [];
 
-    await fs.mkdir(this.cacheDir, { recursive: true });
+    await fs.mkdir(this.cacheDir, { recursive: true, mode: 0o700 });
     const cached = new Map();
     const pending = [];
 
@@ -84,7 +89,7 @@ class VulnerabilityIntelService {
     const token = String(this.getGitHubToken() || '').trim();
     const headers = {
       Accept: 'application/vnd.github+json',
-      'User-Agent': 'Scorecard-Radar/1.0'
+      'User-Agent': USER_AGENT
     };
     if (token) headers.Authorization = `Bearer ${token}`;
 
@@ -93,17 +98,17 @@ class VulnerabilityIntelService {
       throw new Error('GitHub advisory rate limit reached; add a GitHub token in Settings.');
     }
     if (!response.ok) throw new Error(`GitHub advisory request failed (${response.status})`);
-    const data = await response.json();
+    const data = await readJsonResponse(response, MAX_ADVISORY_BYTES);
     return Array.isArray(data) ? data[0] || null : data;
   }
 
   async fetchOsv(id) {
     const response = await fetchWithTimeout(`${OSV_URL}${encodeURIComponent(id)}`, {
-      headers: { 'User-Agent': 'Scorecard-Radar/1.0' }
+      headers: { 'User-Agent': USER_AGENT }
     }, 15000);
     if (response.status === 404) return null;
     if (!response.ok) throw new Error(`OSV request failed (${response.status})`);
-    return response.json();
+    return readJsonResponse(response, MAX_ADVISORY_BYTES);
   }
 
   async fetchEpss(cveIds) {
@@ -113,10 +118,10 @@ class VulnerabilityIntelService {
       const url = new URL(EPSS_URL);
       url.searchParams.set('cve', chunk.join(','));
       const response = await fetchWithTimeout(url, {
-        headers: { 'User-Agent': 'Scorecard-Radar/1.0' }
+        headers: { 'User-Agent': USER_AGENT }
       }, 15000);
       if (!response.ok) throw new Error(`EPSS request failed (${response.status})`);
-      const payload = await response.json();
+      const payload = await readJsonResponse(response, MAX_EPSS_BYTES);
       for (const item of payload?.data || []) {
         result.set(String(item.cve).toUpperCase(), {
           probability: toNumber(item.epss),
@@ -141,10 +146,10 @@ class VulnerabilityIntelService {
 
     try {
       const response = await fetchWithTimeout(CISA_KEV_URL, {
-        headers: { 'User-Agent': 'Scorecard-Radar/1.0' }
+        headers: { 'User-Agent': USER_AGENT }
       }, 20000);
       if (!response.ok) throw new Error(`CISA KEV request failed (${response.status})`);
-      const payload = await response.json();
+      const payload = await readJsonResponse(response, MAX_KEV_BYTES);
       this.kevMap = mapKev(payload);
       this.kevLoadedAt = Date.now();
       await writeJsonAtomic(cachePath, { savedAt: this.kevLoadedAt, payload });
@@ -234,9 +239,9 @@ function combineIntel(id, { github, osv, kev, epss, aliases }) {
 
   return {
     id,
-    aliases,
-    title: github?.summary || osv?.summary || id,
-    description: github?.description || osv?.details || '',
+    aliases: aliases.slice(0, 100),
+    title: limitText(github?.summary || osv?.summary || id, 500),
+    description: limitText(github?.description || osv?.details || '', 20000),
     severity,
     priority,
     priorityLabel: priorityLabel(priority, Boolean(kev)),
@@ -252,7 +257,7 @@ function combineIntel(id, { github, osv, kev, epss, aliases }) {
       github?.html_url,
       ...(github?.references || []),
       ...((osv?.references || []).map((ref) => ref.url))
-    ].filter(Boolean)).slice(0, 12),
+    ].filter(isSafeHttpsUrl)).slice(0, 12),
     sources: {
       github: Boolean(github && !github.error),
       osv: Boolean(osv && !osv.error),
@@ -285,10 +290,10 @@ function collectAffected(github, osv) {
   const output = [];
   for (const item of github?.vulnerabilities || []) {
     output.push({
-      ecosystem: item?.package?.ecosystem || '',
-      package: item?.package?.name || '',
-      vulnerableRange: item?.vulnerable_version_range || '',
-      fixedVersion: item?.first_patched_version || '',
+      ecosystem: limitText(item?.package?.ecosystem || '', 100),
+      package: limitText(item?.package?.name || '', 500),
+      vulnerableRange: limitText(item?.vulnerable_version_range || '', 2000),
+      fixedVersion: limitText(item?.first_patched_version || '', 500),
       fixedRanges: [],
       source: 'GitHub Advisory Database'
     });
@@ -301,11 +306,11 @@ function collectAffected(github, osv) {
       }
     }
     output.push({
-      ecosystem: item?.package?.ecosystem || '',
-      package: item?.package?.name || item?.package?.purl || '',
-      vulnerableRange: summarizeOsvRanges(item?.ranges || []),
-      fixedVersion: fixedRanges[0] || '',
-      fixedRanges,
+      ecosystem: limitText(item?.package?.ecosystem || '', 100),
+      package: limitText(item?.package?.name || item?.package?.purl || '', 500),
+      vulnerableRange: limitText(summarizeOsvRanges(item?.ranges || []), 2000),
+      fixedVersion: limitText(fixedRanges[0] || '', 500),
+      fixedRanges: fixedRanges.map((value) => limitText(value, 500)).slice(0, 50),
       source: 'OSV'
     });
   }
@@ -333,7 +338,7 @@ function summarizeOsvRanges(ranges) {
       parts.push(`${range.type || 'range'}: ${introduced.join(', ') || 'unknown'} → ${fixed.join(', ') || 'unfixed'}`);
     }
   }
-  return parts.join('; ');
+  return limitText(parts.join('; '), 2000);
 }
 
 function collectAliases(id, github, osv) {
@@ -341,7 +346,7 @@ function collectAliases(id, github, osv) {
   for (const item of github?.identifiers || []) values.push(item?.value);
   if (github?.ghsa_id) values.push(github.ghsa_id);
   if (github?.cve_id) values.push(github.cve_id);
-  return dedupe(values.filter(Boolean).map((value) => String(value).toUpperCase()));
+  return dedupe(values.filter(Boolean).map((value) => limitText(value, 100).toUpperCase())).slice(0, 100);
 }
 
 function mapKev(payload) {
@@ -349,15 +354,15 @@ function mapKev(payload) {
   for (const item of payload?.vulnerabilities || []) {
     if (!item?.cveID) continue;
     map.set(String(item.cveID).toUpperCase(), {
-      cveId: item.cveID,
-      vendorProject: item.vendorProject || '',
-      product: item.product || '',
-      vulnerabilityName: item.vulnerabilityName || '',
-      dateAdded: item.dateAdded || null,
-      dueDate: item.dueDate || null,
-      requiredAction: item.requiredAction || '',
-      knownRansomwareCampaignUse: item.knownRansomwareCampaignUse || 'Unknown',
-      notes: item.notes || ''
+      cveId: limitText(item.cveID, 100),
+      vendorProject: limitText(item.vendorProject || '', 500),
+      product: limitText(item.product || '', 500),
+      vulnerabilityName: limitText(item.vulnerabilityName || '', 1000),
+      dateAdded: limitText(item.dateAdded || '', 50) || null,
+      dueDate: limitText(item.dueDate || '', 50) || null,
+      requiredAction: limitText(item.requiredAction || '', 5000),
+      knownRansomwareCampaignUse: limitText(item.knownRansomwareCampaignUse || 'Unknown', 100),
+      notes: limitText(item.notes || '', 5000)
     });
   }
   return map;
@@ -446,7 +451,7 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 15000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(url, { ...options, signal: controller.signal });
+    return await fetch(url, { redirect: 'error', credentials: 'omit', referrerPolicy: 'no-referrer', ...options, signal: controller.signal });
   } catch (error) {
     if (error.name === 'AbortError') throw new Error(`Request timed out after ${Math.round(timeoutMs / 1000)} seconds`);
     throw error;
@@ -455,19 +460,60 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 15000) {
   }
 }
 
+
+async function readJsonResponse(response, maxBytes) {
+  const declaredLength = Number.parseInt(response.headers.get('content-length') || '', 10);
+  if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+    throw new Error(`Response exceeded the ${Math.round(maxBytes / 1024 / 1024)} MB safety limit.`);
+  }
+
+  if (!response.body?.getReader) {
+    const text = await response.text();
+    if (Buffer.byteLength(text, 'utf8') > maxBytes) throw new Error('Response exceeded the safety limit.');
+    return JSON.parse(text);
+  }
+
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel();
+        throw new Error(`Response exceeded the ${Math.round(maxBytes / 1024 / 1024)} MB safety limit.`);
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return JSON.parse(Buffer.concat(chunks, total).toString('utf8'));
+}
+
 async function readJson(filePath) {
+  const stat = await fs.stat(filePath);
+  if (stat.size > MAX_KEV_BYTES) throw new Error('Cached intelligence file is unexpectedly large.');
   return JSON.parse(await fs.readFile(filePath, 'utf8'));
 }
 
 async function writeJsonAtomic(filePath, value) {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
   const temp = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-  await fs.writeFile(temp, JSON.stringify(value), 'utf8');
+  await fs.writeFile(temp, JSON.stringify(value), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
   await fs.rename(temp, filePath);
+  await fs.chmod(filePath, 0o600).catch(() => {});
 }
 
 function safeName(value) {
   return String(value).replace(/[^a-z0-9._-]+/gi, '_');
+}
+
+function limitText(value, maxLength) {
+  const text = String(value ?? '');
+  return text.length <= maxLength ? text : `${text.slice(0, maxLength)}…`;
 }
 
 function toNumber(value) {

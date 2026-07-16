@@ -1,33 +1,56 @@
 {
   "name": "scorecard-radar",
-  "version": "1.0.0",
-  "description": "Desktop dashboard for reviewing OpenSSF Scorecard JSON reports and contextual vulnerability risk.",
+  "version": "1.1.0",
+  "description": "Local-first Electron dashboard for reviewing OpenSSF Scorecard JSON reports and contextual vulnerability risk.",
   "main": "src/main.js",
-  "author": "OpenAI",
+  "author": "CC-JTWalker contributors",
   "license": "MIT",
   "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CC-JTWalker/CC-ScorecardDashboard.git"
+  },
+  "bugs": {
+    "url": "https://github.com/CC-JTWalker/CC-ScorecardDashboard/issues"
+  },
+  "homepage": "https://github.com/CC-JTWalker/CC-ScorecardDashboard#readme",
+  "engines": {
+    "node": ">=22.12.0",
+    "npm": ">=10.0.0"
+  },
+  "packageManager": "npm@10.9.2",
   "scripts": {
     "start": "electron .",
     "test": "node --test",
-    "dist": "electron-builder",
-    "dist:dir": "electron-builder --dir"
+    "lint": "node scripts/check-project.js",
+    "fuzz": "node fuzz/scorecard.fuzz.js",
+    "check": "npm run lint && npm test",
+    "test:all": "npm run check && npm run fuzz",
+    "dist": "electron-builder --publish never",
+    "dist:dir": "electron-builder --dir --publish never"
   },
   "devDependencies": {
-    "electron": "^43.1.1",
-    "electron-builder": "^26.15.3"
+    "electron": "43.1.1",
+    "electron-builder": "26.15.3",
+    "fast-check": "4.9.0"
   },
   "build": {
-    "appId": "com.openai.scorecardradar",
+    "appId": "com.ccjtwalker.scorecardradar",
     "productName": "Scorecard Radar",
+    "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
     "files": [
       "src/**/*",
       "package.json",
       "README.md",
+      "SECURITY.md",
       "LICENSE"
     ],
     "asar": true,
+    "npmRebuild": false,
     "mac": {
       "category": "public.app-category.developer-tools",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
       "target": [
         "dmg",
         "zip"

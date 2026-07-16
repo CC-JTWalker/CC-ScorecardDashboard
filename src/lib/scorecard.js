@@ -25,6 +25,12 @@ const CHECK_RISK = Object.freeze({
 });
 
 const RISK_WEIGHT = Object.freeze({ critical: 4, high: 3, medium: 2, low: 1, unknown: 1 });
+const MAX_REPORTS_PER_FILE = 5000;
+const MAX_CONTAINER_DEPTH = 100;
+const MAX_CHECKS_PER_REPORT = 5000;
+const MAX_DETAILS_PER_CHECK = 500;
+const MAX_TEXT_LENGTH = 20000;
+const MAX_IDENTIFIERS_PER_REPORT = 5000;
 const ID_PATTERN = /\b(?:CVE-\d{4}-\d{4,}|GHSA-[23456789cfghjmpqrvwx]{4}-[23456789cfghjmpqrvwx]{4}-[23456789cfghjmpqrvwx]{4})\b/gi;
 
 function parseReportText(text, filePath = 'unknown.json') {
@@ -40,6 +46,7 @@ function parseReportText(text, filePath = 'unknown.json') {
     for (let i = 0; i < lines.length; i += 1) {
       try {
         parsed.push(JSON.parse(lines[i]));
+      if (parsed.length > MAX_REPORTS_PER_FILE) throw new Error(`Too many report objects; maximum is ${MAX_REPORTS_PER_FILE}.`);
       } catch {
         const error = new Error(`Invalid JSON or NDJSON at line ${i + 1}: ${jsonError.message}`);
         error.cause = jsonError;
@@ -49,22 +56,40 @@ function parseReportText(text, filePath = 'unknown.json') {
     value = parsed;
   }
 
-  return flattenPotentialReports(value)
+  const potentialReports = flattenPotentialReports(value);
+  if (potentialReports.length > MAX_REPORTS_PER_FILE) {
+    throw new Error(`Too many report objects; maximum is ${MAX_REPORTS_PER_FILE}.`);
+  }
+  return potentialReports
     .filter(looksLikeScorecard)
     .map((item, index) => normalizeReport(item, filePath, index));
 }
 
 function flattenPotentialReports(value) {
-  if (Array.isArray(value)) return value.flatMap(flattenPotentialReports);
-  if (!value || typeof value !== 'object') return [];
-
-  if (Array.isArray(value.results) && !looksLikeScorecard(value)) {
-    return value.results.flatMap(flattenPotentialReports);
+  const output = [];
+  const stack = [{ value, depth: 0 }];
+  while (stack.length) {
+    const current = stack.pop();
+    if (current.depth > MAX_CONTAINER_DEPTH) throw new Error(`Report nesting exceeds ${MAX_CONTAINER_DEPTH} levels.`);
+    if (Array.isArray(current.value)) {
+      for (let index = current.value.length - 1; index >= 0; index -= 1) {
+        stack.push({ value: current.value[index], depth: current.depth + 1 });
+      }
+      continue;
+    }
+    if (!current.value || typeof current.value !== 'object') continue;
+    if (Array.isArray(current.value.results) && !looksLikeScorecard(current.value)) {
+      stack.push({ value: current.value.results, depth: current.depth + 1 });
+      continue;
+    }
+    if (Array.isArray(current.value.scorecards)) {
+      stack.push({ value: current.value.scorecards, depth: current.depth + 1 });
+      continue;
+    }
+    output.push(current.value);
+    if (output.length > MAX_REPORTS_PER_FILE) throw new Error(`Too many report objects; maximum is ${MAX_REPORTS_PER_FILE}.`);
   }
-  if (Array.isArray(value.scorecards)) {
-    return value.scorecards.flatMap(flattenPotentialReports);
-  }
-  return [value];
+  return output;
 }
 
 function looksLikeScorecard(value) {
@@ -139,7 +164,7 @@ function normalizeReport(raw, filePath, index = 0) {
 
 function normalizeChecks(checks) {
   if (!Array.isArray(checks)) return [];
-  return checks.map((check, index) => {
+  return checks.slice(0, MAX_CHECKS_PER_REPORT).map((check, index) => {
     if (typeof check === 'string') {
       return { name: check, score: null, reason: '', details: [], documentation: '', index };
     }
@@ -158,20 +183,33 @@ function normalizeChecks(checks) {
 }
 
 function normalizeDetails(value) {
-  if (value == null) return [];
-  if (Array.isArray(value)) return value.flatMap(normalizeDetails).filter(Boolean);
-  if (typeof value === 'string') return [value];
-  if (typeof value === 'number' || typeof value === 'boolean') return [String(value)];
-  if (typeof value === 'object') {
-    const preferred = firstString(value.message, value.reason, value.text, value.path, value.name);
-    if (preferred) return [preferred];
-    try {
-      return [JSON.stringify(value)];
-    } catch {
-      return [];
+  const output = [];
+  const stack = [{ value, depth: 0 }];
+  while (stack.length && output.length < MAX_DETAILS_PER_CHECK) {
+    const current = stack.pop();
+    if (current.value == null || current.depth > 30) continue;
+    if (Array.isArray(current.value)) {
+      const remaining = Math.min(current.value.length, MAX_DETAILS_PER_CHECK - output.length);
+      for (let index = remaining - 1; index >= 0; index -= 1) {
+        stack.push({ value: current.value[index], depth: current.depth + 1 });
+      }
+      continue;
+    }
+    if (typeof current.value === 'string') output.push(limitText(current.value));
+    else if (typeof current.value === 'number' || typeof current.value === 'boolean') output.push(String(current.value));
+    else if (typeof current.value === 'object') {
+      const preferred = firstString(current.value.message, current.value.reason, current.value.text, current.value.path, current.value.name);
+      if (preferred) output.push(preferred);
+      else {
+        try {
+          output.push(limitText(JSON.stringify(current.value)));
+        } catch {
+          // Ignore values that cannot be serialized.
+        }
+      }
     }
   }
-  return [];
+  return output.filter(Boolean);
 }
 
 function extractIdentifiers(value) {
@@ -179,10 +217,13 @@ function extractIdentifiers(value) {
   const seen = new WeakSet();
 
   function walk(item, depth = 0) {
-    if (depth > 30 || item == null) return;
+    if (depth > 30 || item == null || found.size >= MAX_IDENTIFIERS_PER_REPORT) return;
     if (typeof item === 'string') {
       const matches = item.match(ID_PATTERN) || [];
-      for (const match of matches) found.add(match.toUpperCase());
+      for (const match of matches) {
+        found.add(match.toUpperCase());
+        if (found.size >= MAX_IDENTIFIERS_PER_REPORT) break;
+      }
       return;
     }
     if (typeof item !== 'object') return;
@@ -243,9 +284,14 @@ function gradeForScore(score) {
 
 function firstString(...values) {
   for (const value of values) {
-    if (typeof value === 'string' && value.trim()) return value.trim();
+    if (typeof value === 'string' && value.trim()) return limitText(value.trim());
   }
   return null;
+}
+
+function limitText(value) {
+  const text = String(value || '');
+  return text.length > MAX_TEXT_LENGTH ? `${text.slice(0, MAX_TEXT_LENGTH - 1)}…` : text;
 }
 
 function firstNumber(...values) {

@@ -1,5 +1,9 @@
 # Scorecard Radar
 
+[![CI](https://github.com/CC-JTWalker/CC-ScorecardDashboard/actions/workflows/ci.yml/badge.svg)](https://github.com/CC-JTWalker/CC-ScorecardDashboard/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/CC-JTWalker/CC-ScorecardDashboard/actions/workflows/codeql.yml/badge.svg)](https://github.com/CC-JTWalker/CC-ScorecardDashboard/actions/workflows/codeql.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/CC-JTWalker/CC-ScorecardDashboard/badge)](https://scorecard.dev/viewer/?uri=github.com/CC-JTWalker/CC-ScorecardDashboard)
+
 Scorecard Radar is a local-first Electron dashboard for reviewing directories of OpenSSF Scorecard JSON reports. It is designed for a fast portfolio-level answer to four questions:
 
 1. Which repositories have the weakest security posture?
@@ -24,14 +28,14 @@ Scorecard Radar is a local-first Electron dashboard for reviewing directories of
 - Produces a contextual 0–100 remediation priority with a visible rationale instead of sorting only by static CVSS.
 - Caches vulnerability results for 24 hours and the CISA KEV catalog for 12 hours, with graceful offline fallback.
 - Includes filtering, search, score history, raw JSON inspection, source status, and CSV export.
-- Uses Electron security boundaries: context isolation, sandboxed renderer, no Node.js integration, IPC allowlisting, HTTPS-only external links, and encrypted token storage through the operating system.
+- Uses Electron security boundaries: context isolation, a sandboxed renderer, no Node.js integration, trusted-sender IPC validation, permission denial, active-scan file authorization, credential-free HTTPS links, response-size limits, and encrypted token storage through the operating system.
 
 ## Run it
 
-Requirements: Node.js 20 or newer and npm.
+Requirements: Node.js 22.12 or newer and npm 10 or newer.
 
 ```bash
-npm install
+npm ci
 npm start
 ```
 
@@ -54,10 +58,19 @@ npm run dist
 ## Test
 
 ```bash
-npm test
+npm run check
+npm run fuzz
 ```
 
-The tests cover parsing, NDJSON, identifier extraction, exact stale thresholds, repository history, KEV prioritization, and CVSS v3 vector calculation.
+The tests cover parsing, NDJSON, identifier extraction, exact stale thresholds, repository history, KEV prioritization, CVSS v3 vector calculation, IPC input validation helpers, path containment, URL restrictions, and export limits. Property-based tests generate 2,000 additional report and identifier cases with `fast-check`.
+
+## Repository security and releases
+
+The repository includes immutable-SHA-pinned workflows for CI, CodeQL, OpenSSF Scorecard, and multi-platform releases. Dependabot tracks npm and GitHub Actions updates. Tagged releases produce installers, SHA-256 checksums, and Sigstore-backed build provenance. See `SECURITY.md`, `CONTRIBUTING.md`, `docs/HARDENING.md`, `docs/SCORECARD_REMEDIATION.md`, `docs/REPOSITORY_SECURITY_SETUP.md`, and `docs/VALIDATION.md`.
+
+Several Scorecard checks depend on settings and history that files cannot create. After merging through an approved pull request, enable the repository rules and security settings in `docs/REPOSITORY_SECURITY_SETUP.md`. Create release tags with a maintainer-controlled signing key.
+
+When dependencies change, run `npm install --package-lock-only` and commit the resulting `package-lock.json`. Do not replace exact dependency versions with ranges.
 
 ## Contextual vulnerability priority
 
@@ -110,7 +123,7 @@ The parser also recognizes several alternate names for repository, timestamp, sc
 - No frontend framework or bundler is required; this keeps installation and auditing simple.
 - Public API failures are isolated by source. One failed source does not discard information from the others.
 - The unauthenticated GitHub API has relatively low rate limits. Add a token in Settings for large directories.
-- The app caps a single JSON file at 25 MB and a scan at 10,000 JSON files to avoid accidental resource exhaustion.
+- The app caps a single JSON file at 25 MB and a scan at 10,000 JSON files to avoid accidental resource exhaustion. Remote intelligence responses, identifier batches, token length, and CSV exports are also bounded.
 
 ## License
 
