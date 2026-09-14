@@ -30,9 +30,9 @@
     "dist:dir": "electron-builder --dir --publish never"
   },
   "devDependencies": {
-    "electron": "43.1.1",
+    "electron": "44.3.0",
     "electron-builder": "26.15.3",
-    "fast-check": "4.9.0"
+    "fast-check": "4.10.0"
   },
   "build": {
     "appId": "com.ccjtwalker.scorecardradar",
